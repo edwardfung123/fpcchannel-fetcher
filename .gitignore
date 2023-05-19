@@ -1,0 +1,8 @@
+.vscode/
+dist/
+node_modules/
+output/
+.DS_Store
+*.png
+*.jpg
+
