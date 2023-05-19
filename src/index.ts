@@ -1,13 +1,15 @@
 import { launch, Browser, Page, devices, ElementHandle } from "puppeteer"
 import { downloadFile } from "./utils"
 import { writeFile, readdir } from "fs/promises"
-import { basename } from "path"
+import { mkdirp } from "mkdirp"
 
 const FIRST_ITEM_SELECTOR = "div#root #thumbnail_area > a"
 const PHOTO_CONTAINER_SELECTOR = 'div[data-sigil="story-popup-metadata story-div feed-ufi-metadata"]'
 const PHOTO_CONTENT_SELECTOR = 'div#MPhotoContent'
 const ALBUM_URL = "https://m.facebook.com/media/set/?set=a.533865628109963&type=3&_rdr"
 
+// Directory that stores all the output files.
+const OUTPUT_DIR = "./output"
 const visitedFbIds: Set<string> = new Set()
 
 interface PhotoPageParams {
@@ -23,6 +25,7 @@ interface TextAndHashTags {
 interface PhotoInfo {
     fbid: string
     text: string
+    url: string
     hashTags: string[]
     imgUrl: string
 }
@@ -35,7 +38,9 @@ async function sleep(t: number) {
 
 async function getPage(b: Browser) {
     const p = await b.newPage();
-    await p.emulate(devices['iPhone 12 Pro Max'])
+    // Dont use iphone device. FB has a pop up to open native app.
+    // Find the device names here: https://github.com/hdorgeval/puppeteer-core-controller/blob/master/lib/actions/page-actions/emulate-device/device-names.ts
+    await p.emulate(devices['Nexus 7'])
     return p
 }
 
@@ -47,6 +52,26 @@ async function loadAlbumPage(p: Page): Promise<void> {
     })
 }
 
+async function loadPhotoPage(p: Page, photoInfo: {fbid: string, url: string}): Promise<void> {
+    console.log(`Loading photo page "${photoInfo.url}".`)
+    await p.goto(photoInfo.url, {timeout: 3000})
+    // await p.screenshot({
+    //     path: `./${photoInfo.fbid}_before.png`
+    // })
+    await Promise.all([
+        p.waitForSelector(PHOTO_CONTAINER_SELECTOR),
+        p.waitForSelector(PHOTO_CONTENT_SELECTOR),
+        p.waitForNetworkIdle(),
+    ]);
+    // await p.screenshot({
+    //     path: `./${photoInfo.fbid}.png`
+    // })
+}
+
+/**
+ * @deprecated
+ * @param p
+ */
 async function clickFirstItem(p: Page): Promise<void> {
     await p.click(FIRST_ITEM_SELECTOR);
     await Promise.all([
@@ -83,7 +108,9 @@ async function clickNextPhoto(p: Page): Promise<void> {
     await sleep(1000) // avoid FB throttle. and 500ms is too low.
 }
 
-async function getPhotoInfo(p: Page): Promise<PhotoInfo> {
+async function getPhotoInfo(p: Page): Promise<{
+    imgUrl: string, text: string, hashTags: string[]
+}> {
     const params: PhotoPageParams = await p.evaluate(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const params = Object.fromEntries(urlParams);
@@ -97,7 +124,6 @@ async function getPhotoInfo(p: Page): Promise<PhotoInfo> {
     console.log(text)
     console.log(hashTags)
     return {
-        fbid: params.fbid,
         imgUrl, text, hashTags,
     }
 }
@@ -106,11 +132,12 @@ async function savePhotoInfo({text, hashTags, fbid}: PhotoInfo) {
     const s = JSON.stringify({
         text, hashTags
     }, null, 2)
-    await writeFile(`./output/${fbid}.json`, s, "utf-8")
+    await writeFile(`${OUTPUT_DIR}/${fbid}.json`, s, "utf-8")
 }
 
 /**
  * DO NOT USE. it requires login. F__K FB.
+ * @deprecated
  * @param p
  * @param params
  * @returns
@@ -219,47 +246,110 @@ async function getTextAndHashTags(p: Page, params: PhotoPageParams): Promise<Tex
     }
 }
 
-async function main() {
+async function ensureOutputDir(dirname: string) {
+    await mkdirp(dirname)
+}
+
+async function loadPool(output_dir: string) {
     const loadedPool = new Set();
-    await loadPool()
+    const files = await readdir(output_dir, "utf-8")
+    // TODO: we should check both json and jpg file exist.
+    for (const file of files) {
+        const match = /(\d+)(.json|jpg)$/.exec(file)
+        if (match) {
+            const fbid = match[1]
+            loadedPool.add(fbid)
+        }
+    }
+    console.log(`${loadedPool.size} found in ${output_dir}.`)
+    loadedPool.forEach((v) => {
+        console.log(`"${v}"`)
+    })
+    return loadedPool
+}
+
+async function getAllPhotoIdsFromAlbumPage(p: Page): Promise<{fbid: string, url: string}[]> {
+    await loadAlbumPage(p);
+    await clickSeeMorePhotos(p);
+    await sleep(100);
+    await keepScrollUntilNoMorePhotos(p, 100);
+    const miniPhotoInfo = await findAllPhotoIds(p);
+    console.log(`${miniPhotoInfo.length} PhotoIDs found.`);
+    console.log("Printing the first 5 info.")
+    for (let i = 0 ; i < 5; i++) {
+        console.log(`${i}: ${miniPhotoInfo[i].fbid}    ${miniPhotoInfo[i].url}`)
+    }
+    return miniPhotoInfo
+}
+
+/**
+ * click the "see more photos" to trigger the infinite scroll.
+ * @param p The Page that with album page opened
+ */
+async function clickSeeMorePhotos(p: Page){
+    // TODO
+}
+
+/**
+ * keep scolling, wait a bit, and scroll again until nothing to be added.
+ * @param p the Page with album page opened
+ */
+async function keepScrollUntilNoMorePhotos(p: Page, waitTime: number) {
+    // TODO
+}
+
+/**
+ *
+ * @param p
+ */
+async function findAllPhotoIds(p: Page): Promise<{fbid: string, url: string}[]> {
+    // TODO
+    const n = await p.$$eval("div#thumbnail_area > a[data-store]", (aElements) => aElements.length)
+    console.log(`${n} a[data-store] found.`)
+    return await p.$$eval("div#thumbnail_area > a[data-store]",
+        (aElements) => {
+            return aElements.map(
+                a => {
+                    return {
+                        // force it to be string.
+                        fbid: "" + JSON.parse(a.getAttribute("data-store") || "{}").id,
+                        url: (a as HTMLAnchorElement).href,
+                    }
+                }
+            )
+        })
+}
+
+async function main() {
+    await ensureOutputDir(OUTPUT_DIR);
+    const loadedPool = await loadPool(OUTPUT_DIR);
+
     const b = await launch();
     const p = await getPage(b);
-    await loadAlbumPage(p);
-    await clickFirstItem(p);
-    let count = 0
-    do {
-        let photoInfo = await getPhotoInfo(p)
-        if (visitedFbIds.has(photoInfo.fbid)) {
-            break
-        }
-
-        if (loadedPool.has(photoInfo)) {
+    const allPhotoInfos = await getAllPhotoIdsFromAlbumPage(p);
+    for (let photoInfo of allPhotoInfos) {
+        console.log(`Trying to load "${photoInfo.fbid}"`)
+        if (loadedPool.has(photoInfo.fbid)) {
+            console.log(`PhotoID has already loaded before ${photoInfo.fbid}.`)
             continue
         }
 
-        visitedFbIds.add(photoInfo.fbid)
-        await downloadFile(photoInfo.imgUrl, `./output/${photoInfo.fbid}.jpg`)
-        await savePhotoInfo(photoInfo)
-        await clickNextPhoto(p)
+        await loadPhotoPage(p, photoInfo);
+        const fullPhotoInfo = {
+            ...photoInfo,
+            ...await getPhotoInfo(p)
+        }
+        await downloadFile(fullPhotoInfo.imgUrl, `${OUTPUT_DIR}/${photoInfo.fbid}.jpg`)
+        await savePhotoInfo(fullPhotoInfo)
+        loadedPool.add(photoInfo.fbid)
+        console.log("wait 500ms before fetching the next.")
+        await sleep(5000)
+    }
 
-        count += 1
-    } while (count < 500)   // protect from buggy
     await p.close();
     await b.close();
 
     return
-
-    async function loadPool() {
-        const files = await readdir("./output", "utf-8")
-        for (const file of files) {
-            const match = /(\d+)(.json|jpg)$/.exec(file)
-            if (match) {
-                const fbid = match[1]
-                loadedPool.add(fbid)
-            }
-        }
-        console.log(loadedPool)
-    }
 }
 
 main()
