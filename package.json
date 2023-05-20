@@ -2,7 +2,7 @@
   "dependencies": {
     "minimist": "^1.2.7",
     "mkdirp": "^3.0.1",
-    "puppeteer": "^16.2.0"
+    "puppeteer": "^20.2.1"
   },
   "scripts": {
     "build": "tsc",

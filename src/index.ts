@@ -1,4 +1,4 @@
-import { launch, Browser, Page, devices, ElementHandle } from "puppeteer"
+import { launch, Browser, Page, KnownDevices, ElementHandle } from "puppeteer"
 import { downloadFile } from "./utils"
 import { writeFile, readdir } from "fs/promises"
 import { mkdirp } from "mkdirp"
@@ -40,7 +40,7 @@ async function getPage(b: Browser) {
     const p = await b.newPage();
     // Dont use iphone device. FB has a pop up to open native app.
     // Find the device names here: https://github.com/hdorgeval/puppeteer-core-controller/blob/master/lib/actions/page-actions/emulate-device/device-names.ts
-    await p.emulate(devices['Nexus 7'])
+    await p.emulate(KnownDevices['Nexus 7'])
     return p
 }
 
@@ -54,7 +54,9 @@ async function loadAlbumPage(p: Page): Promise<void> {
 
 async function loadPhotoPage(p: Page, photoInfo: {fbid: string, url: string}): Promise<void> {
     console.log(`Loading photo page "${photoInfo.url}".`)
-    await p.goto(photoInfo.url, {timeout: 3000})
+    await p.goto(photoInfo.url, {
+        timeout: 10_000,
+    })
     // await p.screenshot({
     //     path: `./${photoInfo.fbid}_before.png`
     // })
@@ -271,8 +273,8 @@ async function loadPool(output_dir: string) {
 async function getAllPhotoIdsFromAlbumPage(p: Page): Promise<{fbid: string, url: string}[]> {
     await loadAlbumPage(p);
     await clickSeeMorePhotos(p);
-    await sleep(100);
-    await keepScrollUntilNoMorePhotos(p, 100);
+    await sleep(1000);
+    await keepScrollUntilNoMorePhotos(p, 5000);
     const miniPhotoInfo = await findAllPhotoIds(p);
     console.log(`${miniPhotoInfo.length} PhotoIDs found.`);
     console.log("Printing the first 5 info.")
@@ -288,6 +290,17 @@ async function getAllPhotoIdsFromAlbumPage(p: Page): Promise<{fbid: string, url:
  */
 async function clickSeeMorePhotos(p: Page){
     // TODO
+    const ele = await p.$("#m_more_item > a")
+    if (!ele) {
+        throw new Error("Unable to find the element to trigger 'see more photos'.")
+    }
+    console.log("Element found for the 'see more photos'.")
+    console.log(`${await countThumbnail(p)} thumbnails before clicking see more photos.`)
+    await ele.click()
+}
+
+async function countThumbnail(p: Page) {
+    return await p.$$eval("div#thumbnail_area > a", (elements) => elements.length)
 }
 
 /**
@@ -295,7 +308,28 @@ async function clickSeeMorePhotos(p: Page){
  * @param p the Page with album page opened
  */
 async function keepScrollUntilNoMorePhotos(p: Page, waitTime: number) {
+    // see https://stackoverflow.com/questions/51529332/puppeteer-scroll-down-until-you-cant-anymore
     // TODO
+
+    let before, after;
+    do {
+        before = await countThumbnail(p)
+
+        await p.$eval("div#thumbnail_area > a[data-store]:last-child", (ele) => {
+            if (!ele) {
+                throw new Error("Last thumbnail not found which is impossible unless there is no thumbnail at all.")
+            }
+
+            ele.scrollIntoView();
+        })
+        await sleep(waitTime);
+
+        after = await countThumbnail(p)
+        await p.screenshot({
+            path: "./last_scroll.png"
+        })
+        console.log(`Before = ${before} After = ${after}.`)
+    } while (before !== after)
 }
 
 /**
@@ -324,7 +358,9 @@ async function main() {
     await ensureOutputDir(OUTPUT_DIR);
     const loadedPool = await loadPool(OUTPUT_DIR);
 
-    const b = await launch();
+    const b = await launch({
+        headless: "new",
+    });
     const p = await getPage(b);
     const allPhotoInfos = await getAllPhotoIdsFromAlbumPage(p);
     for (let photoInfo of allPhotoInfos) {
@@ -343,7 +379,7 @@ async function main() {
         await savePhotoInfo(fullPhotoInfo)
         loadedPool.add(photoInfo.fbid)
         console.log("wait 500ms before fetching the next.")
-        await sleep(5000)
+        await sleep(500)
     }
 
     await p.close();
